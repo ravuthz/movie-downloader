@@ -1,162 +1,238 @@
-import re
-import time
+import os
 import subprocess
 import gradio as gr
-from urllib.parse import urljoin
-
+from urllib.parse import urljoin, urlparse
 from playwright.sync_api import sync_playwright
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+OUTPUT_ROOT = "download"
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+QUEUE = []
 
 
-# ======================================================
-# CLEAN URL
-# ======================================================
-def clean_url(url: str):
-    if not url:
-        return None
-
-    url = re.sub(r"https:\s*/\s*/", "https://", url)
-    url = url.replace("\\/", "/")
-    url = url.replace("https:/", "https://")
-    return url
+# -------------------------------------------------------
+# derive folder name from URL
+# -------------------------------------------------------
+def get_folder_name(url: str):
+    path = urlparse(url).path.strip("/")
+    parts = path.split("/")
+    return parts[-2] if len(parts) >= 2 else "output"
 
 
-# ======================================================
-# EXTRACT FROM DOM (YOUR REQUIREMENT)
-# ======================================================
-def extract_from_dom(page, url):
-    page.goto(url, wait_until="networkidle")
-    page.wait_for_timeout(3000)
+# -------------------------------------------------------
+# FFmpeg runner
+# -------------------------------------------------------
+def run_ffmpeg(url, output, headers):
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-user_agent",
+        headers["user_agent"],
+        "-referer",
+        headers["referer"],
+        "-headers",
+        headers["cookie_header"],
+        "-i",
+        url,
+        "-c",
+        "copy",
+        output,
+        "-loglevel",
+        "error",
+    ]
 
-    src = page.evaluate("""
-        () => {
-            const el = document.querySelector('#shortmovs-videojs-player_html5_api');
-            return el ? el.getAttribute('src') : null;
-        }
-    """)
-
-    return clean_url(src)
-
-
-# ======================================================
-# STATIC PAGE CRAWLER (1.html -> 2.html ...)
-# ======================================================
-def build_next(url):
-    match = re.search(r"(\d+)\.html", url)
-    if not match:
-        return None
-    n = int(match.group(1))
-    return re.sub(r"\d+\.html", f"{n+1}.html", url)
-
-
-def scan_dom_pages(start_url: str, max_pages: int):
-    results = []
-    visited = set()
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
-
-        queue = [start_url]
-
-        while queue and len(visited) < max_pages:
-            url = queue.pop(0)
-
-            if url in visited:
-                continue
-
-            visited.add(url)
-
-            try:
-                src = extract_from_dom(page, url)
-
-                if src and "m3u8" in src:
-                    results.append(src)
-
-                # auto next page
-                nxt = build_next(url)
-                if nxt and nxt not in visited:
-                    queue.append(nxt)
-
-            except Exception as e:
-                print("Error:", url, e)
-
-        browser.close()
-
-    return sorted(set(results))
-
-
-# ======================================================
-# WRAPPER
-# ======================================================
-def extract(url, pages):
-    if not url:
-        return ""
-
-    try:
-        pages = int(pages)
-    except:
-        pages = 10
-
-    return "\n".join(scan_dom_pages(url, pages))
-
-
-# ======================================================
-# BATCH DOWNLOAD
-# ======================================================
-def batch_download(text, prefix):
-    if not text.strip():
-        return "No URLs found"
-
-    urls = [x.strip() for x in text.split("\n") if x.strip()]
-    total = len(urls)
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
 
     logs = []
 
-    for i, url in enumerate(urls, 1):
-        output = f"{prefix}_{i}.mp4"
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            if process.poll() is not None:
+                break
+            continue
 
-        cmd = ["ffmpeg", "-y", "-i", url, "-c", "copy", output]
+        logs.append(line.strip())
+        yield "\n".join(logs[-40:])
 
-        try:
-            subprocess.run(
-                cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            logs.append(f"[{i}/{total}] SUCCESS → {output}")
-        except:
-            logs.append(f"[{i}/{total}] FAILED → {url}")
+    process.wait()
 
-        time.sleep(0.2)
-
-    return "\n".join(logs)
+    yield "✅ DONE" if process.returncode == 0 else "❌ FAILED"
 
 
-# ======================================================
-# GRADIO UI
-# ======================================================
-with gr.Blocks(title="Shortmovs DOM Extractor") as app:
+# -------------------------------------------------------
+# extract function (CUSTOMIZE THIS)
+# -------------------------------------------------------
+def extract_media_url(page):
+    # -----------------------------
+    # 1. Try player_aaaa (BEST)
+    # -----------------------------
+    try:
+        data = page.evaluate("() => window.player_aaaa || null")
+        if data and isinstance(data, dict) and data.get("url"):
+            return data["url"]
+    except:
+        pass
 
-    gr.Markdown("## 🎥 DOM Video Extractor + Batch Downloader")
+    # -----------------------------
+    # 2. Try VideoJS DOM
+    # -----------------------------
+    try:
+        m3u8 = page.evaluate("""
+            () => {
+                const el = document.querySelector('#shortmovs-videojs-player_html5_api');
+                return el ? el.getAttribute('src') : null;
+            }
+        """)
+        if m3u8:
+            return m3u8
+    except:
+        pass
 
-    url_input = gr.Textbox(label="Start URL (e.g. 60.html)")
 
-    pages_input = gr.Number(label="Max Pages", value=10, precision=0)
+# -------------------------------------------------------
+# 1. CRAWL
+# -------------------------------------------------------
+def crawl(base_url, max_page, progress=gr.Progress()):
+    global QUEUE
+    QUEUE = []
 
-    btn_extract = gr.Button("Extract Video URLs")
+    max_page = int(max_page)
+    logs = []
 
-    output = gr.Textbox(label="Extracted m3u8 URLs", lines=12)
+    folder = get_folder_name(base_url)
 
-    prefix = gr.Textbox(label="Output Prefix", value="video")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context()
+        page = context.new_page()
 
-    btn_download = gr.Button("Download All (FFmpeg)")
+        base_url = urljoin(base_url, ".")
 
-    download_log = gr.Textbox(label="Progress Log", lines=12)
+        page.goto(base_url + f"1.html")
+        page.wait_for_timeout(2000)
 
-    # actions
-    btn_extract.click(fn=extract, inputs=[url_input, pages_input], outputs=output)
+        for i in range(1, max_page + 1):
+            # if base_url.endswith("1.html"):
+            #     url = base_url.replace("1.html", f"{i}.html")
+            # else:
+            #     url = base_url.rstrip("/") + f"/{i}.html"
 
-    btn_download.click(fn=batch_download, inputs=[output, prefix], outputs=download_log)
+            url = base_url + f"{i}.html"
+
+            progress(i / max_page, desc=f"Crawling {i}/{max_page}")
+
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+                page.wait_for_timeout(1500)
+
+                media = extract_media_url(page)
+
+                if media:
+                    QUEUE.append(media)
+                    logs.append(f"[{i}] FOUND")
+                else:
+                    logs.append(f"[{i}] EMPTY")
+
+                yield "\n".join(logs[-50:]), "\n".join(QUEUE)
+
+            except Exception as e:
+                logs.append(f"[{i}] ERROR {e}")
+                yield "\n".join(logs[-50:]), "\n".join(QUEUE)
+
+        browser.close()
+
+    yield "🎉 CRAWL DONE", "\n".join(QUEUE)
+
+
+# -------------------------------------------------------
+# 2. DOWNLOAD
+# -------------------------------------------------------
+def download(queue_text, base_url, progress=gr.Progress()):
+
+    urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
+
+    if not urls:
+        yield "Empty queue"
+        return
+
+    logs = []
+
+    folder = get_folder_name(base_url)
+    save_dir = os.path.join(OUTPUT_ROOT, folder)
+    os.makedirs(save_dir, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+
+        page.goto("https://example.com")
+        page.wait_for_timeout(1000)
+
+        headers = {
+            "user_agent": page.evaluate("navigator.userAgent"),
+            "referer": base_url,
+            "cookie_header": "",
+        }
+
+        total = len(urls)
+
+        for i, url in enumerate(urls, 1):
+
+            progress(i / total, desc=f"Downloading {i}/{total}")
+
+            name = f"video_{i}"
+            output = os.path.join(save_dir, f"{name}.mp4")
+
+            logs.append(f"[{i}/{total}] {name}")
+            yield "\n".join(logs[-60:])
+
+            for out in run_ffmpeg(url, output, headers):
+                logs[-1] = out
+                yield "\n".join(logs[-60:])
+
+        browser.close()
+
+    yield "🎉 DOWNLOAD COMPLETE"
+
+
+# -------------------------------------------------------
+# UI
+# -------------------------------------------------------
+with gr.Blocks(title="Crawler Pipeline") as app:
+
+    gr.Markdown("# 🎥 Crawl → Queue → Download Pipeline")
+
+    base_url = gr.Textbox(label="Base URL")
+    max_page = gr.Number(value=10, label="Max Pages")
+
+    crawl_btn = gr.Button("1️⃣ Crawl")
+
+    crawl_log = gr.Textbox(label="Crawler Log", lines=12)
+    queue_box = gr.Textbox(label="Queue", lines=10)
+
+    download_btn = gr.Button("2️⃣ Download")
+
+    download_log = gr.Textbox(label="Download Log", lines=15)
+
+    crawl_btn.click(
+        crawl,
+        inputs=[base_url, max_page],
+        outputs=[crawl_log, queue_box],
+    )
+
+    download_btn.click(
+        download,
+        inputs=[queue_box, base_url],
+        outputs=download_log,
+    )
 
 
 if __name__ == "__main__":
