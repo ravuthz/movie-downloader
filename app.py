@@ -104,14 +104,15 @@ def extract_media_url(page):
 # -------------------------------------------------------
 # 1. CRAWL
 # -------------------------------------------------------
-def crawl(base_url, max_page, headless, progress=gr.Progress()):
+def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
     global QUEUE
     QUEUE = []
 
-    max_page = int(max_page)
+    current_max = int(max_page_input)
+    title = ""
     logs = []
 
-    print(f"\n🚀 STARTING CRAWL: {base_url} (Max: {max_page}, Headless: {headless})")
+    print(f"\n🚀 STARTING CRAWL: {base_url} (Max: {current_max}, Headless: {headless})")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -125,15 +126,44 @@ def crawl(base_url, max_page, headless, progress=gr.Progress()):
             if parsed.path and "." in parsed.path.split("/")[-1]:
                 base_url = urljoin(base_url, ".")
 
-        for i in range(1, max_page + 1):
+        i = 1
+        while i <= current_max:
             url = urljoin(base_url, f"{i}.html")
 
-            progress(i / max_page, desc=f"Crawling {i}/{max_page}")
-            print(f"  [{i}/{max_page}] Visiting: {url}")
+            progress(i / current_max, desc=f"Crawling {i}/{current_max}")
+            print(f"  [{i}/{current_max}] Visiting: {url}")
 
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_timeout(1500)
+
+                # Detect Title and Max Page (only on first page or if not yet set)
+                try:
+                    new_title = page.eval_on_selector(
+                        ".album-title",
+                        "el => el.innerText.trim()"
+                    )
+                    if new_title:
+                        title = new_title
+
+                    detected_max = page.eval_on_selector(
+                        ".selections-info",
+                        """
+                        el => {
+                            const text = el.innerText || "";
+                            const match = text.match(/(\\d+)\\s*集/);
+                            return match ? parseInt(match[1], 10) : 0;
+                        }
+                        """
+                    )
+                    if detected_max > 0:
+                        current_max = detected_max
+
+                    # Real-time update to UI metadata immediately after detection
+                    yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, current_max
+
+                except:
+                    pass
 
                 media = extract_media_url(page)
 
@@ -147,18 +177,20 @@ def crawl(base_url, max_page, headless, progress=gr.Progress()):
                     logs.append(msg)
                     print(f"      {msg}")
 
-                yield "\n".join(logs[-50:]), "\n".join(QUEUE)
+                yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, current_max
 
             except Exception as e:
                 msg = f"[{i}] ❌ ERROR: {e}"
                 logs.append(msg)
                 print(f"      {msg}")
-                yield "\n".join(logs[-50:]), "\n".join(QUEUE)
+                yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, current_max
+            
+            i += 1
 
         browser.close()
 
     print("🎉 CRAWL DONE\n")
-    yield "🎉 CRAWL DONE", "\n".join(QUEUE)
+    yield "🎉 CRAWL DONE", "\n".join(QUEUE), title, current_max
 
 
 # -------------------------------------------------------
@@ -225,19 +257,12 @@ def download(queue_text, base_url, headless, progress=gr.Progress()):
 # UI
 # -------------------------------------------------------
 custom_css = """
-#max-pages {
-    min-width: 100px !important;
-    max-width: 100px !important;
-    flex: none !important;
-}
 #headless-toggle {
-    margin-top: 0px;
+    padding-top: 35px;
 }
 """
 
-import gradio as gr
-
-with gr.Blocks(title="Crawler Pipeline", theme=gr.themes.Base(), css=custom_css) as app:
+with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) as app:
 
     gr.Markdown("# 🎥 The https://www.shortmovs.com/ Downloader")
 
@@ -246,27 +271,26 @@ with gr.Blocks(title="Crawler Pipeline", theme=gr.themes.Base(), css=custom_css)
             label="Base URL", placeholder="https://example.com/path/", scale=4
         )
         max_page = gr.Number(
-            value=10, label="Max Pages", elem_id="max-pages", precision=0
+            value=10, label="Max Pages", elem_id="max-pages", scale=1, precision=0
         )
 
     with gr.Row():
+        movie_title = gr.Textbox(label="Detected Movie Title", interactive=False, scale=4)
         headless = gr.Checkbox(
-            label="Headless", value=True, scale=2, elem_id="headless-toggle"
+            label="Headless", value=True, scale=1, elem_id="headless-toggle"
         )
-        crawl_btn = gr.Button("1️⃣ Crawl", variant="primary", scale=4)
-        download_btn = gr.Button("2️⃣ Download", variant="primary", scale=4)
+
+    with gr.Row():
+        crawl_btn = gr.Button("1️⃣ Crawl", variant="primary")
+        download_btn = gr.Button("2️⃣ Download", variant="primary")
 
     queue_box = gr.Textbox(label="Queue (URLs found)", lines=9)
-
     all_logs = gr.Textbox(label="Logs", lines=9, interactive=False)
-
-    # crawl_log = gr.Textbox(label="Crawler Log", lines=4, interactive=False)
-    # download_log = gr.Textbox(label="Download Log", lines=15, interactive=False)
 
     crawl_btn.click(
         crawl,
         inputs=[base_url, max_page, headless],
-        outputs=[all_logs, queue_box],
+        outputs=[all_logs, queue_box, movie_title, max_page],
     )
 
     download_btn.click(
