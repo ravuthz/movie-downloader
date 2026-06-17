@@ -30,21 +30,16 @@ def get_video_name(url: str):
 # -------------------------------------------------------
 def run_ffmpeg(url, output, headers):
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-user_agent",
-        headers["user_agent"],
-        "-referer",
-        headers["referer"],
-        "-headers",
-        headers["cookie_header"],
-        "-i",
-        url,
-        "-c",
-        "copy",
+        # fmt: off
+        "ffmpeg", "-y",
+        "-referer", headers["referer"],
+        "-headers", headers["cookie_header"],
+        "-user_agent", headers["user_agent"],
+        "-i", url,
+        "-c", "copy",
         output,
-        "-loglevel",
-        "error",
+        "-loglevel", "error",
+        # fmt: on
     ]
 
     process = subprocess.Popen(
@@ -256,28 +251,28 @@ with gr.Blocks(title="Crawler Pipeline", theme=gr.themes.Base(), css=custom_css)
 
     with gr.Row():
         headless = gr.Checkbox(
-            label="Headless", value=True, scale=1, elem_id="headless-toggle"
+            label="Headless", value=True, scale=2, elem_id="headless-toggle"
         )
-        crawl_btn = gr.Button("1️⃣ Crawl", variant="primary", scale=5)
+        crawl_btn = gr.Button("1️⃣ Crawl", variant="primary", scale=4)
+        download_btn = gr.Button("2️⃣ Download", variant="primary", scale=4)
 
-    with gr.Row():
-        crawl_log = gr.Textbox(label="Crawler Log", lines=12, interactive=False)
-        queue_box = gr.Textbox(label="Queue (URLs found)", lines=12)
+    queue_box = gr.Textbox(label="Queue (URLs found)", lines=9)
 
-    download_btn = gr.Button("2️⃣ Download", variant="primary")
+    all_logs = gr.Textbox(label="Logs", lines=9, interactive=False)
 
-    download_log = gr.Textbox(label="Download Log", lines=15, interactive=False)
+    # crawl_log = gr.Textbox(label="Crawler Log", lines=4, interactive=False)
+    # download_log = gr.Textbox(label="Download Log", lines=15, interactive=False)
 
     crawl_btn.click(
         crawl,
         inputs=[base_url, max_page, headless],
-        outputs=[crawl_log, queue_box],
+        outputs=[all_logs, queue_box],
     )
 
     download_btn.click(
         download,
         inputs=[queue_box, base_url, headless],
-        outputs=download_log,
+        outputs=all_logs,
     )
 
 
