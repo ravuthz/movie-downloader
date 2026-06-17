@@ -19,6 +19,12 @@ def get_folder_name(url: str):
     return parts[-2] if len(parts) >= 2 else "output"
 
 
+def get_video_name(url: str):
+    path = urlparse(url).path.strip("/")
+    parts = path.split("/")
+    return parts[-2] if len(parts) >= 2 else "video"
+
+
 # -------------------------------------------------------
 # FFmpeg runner
 # -------------------------------------------------------
@@ -58,12 +64,16 @@ def run_ffmpeg(url, output, headers):
                 break
             continue
 
-        logs.append(line.strip())
-        yield "\n".join(logs[-40:])
+        clean_line = line.strip()
+        if clean_line:
+            print(f"    [FFmpeg] {clean_line}")
+            logs.append(clean_line)
+            yield "\n".join(logs[-40:])
 
     process.wait()
-
-    yield "✅ DONE" if process.returncode == 0 else "❌ FAILED"
+    status = "✅ DONE" if process.returncode == 0 else "❌ FAILED"
+    print(f"    [FFmpeg] {status}")
+    yield status
 
 
 # -------------------------------------------------------
@@ -99,66 +109,72 @@ def extract_media_url(page):
 # -------------------------------------------------------
 # 1. CRAWL
 # -------------------------------------------------------
-def crawl(base_url, max_page, progress=gr.Progress()):
+def crawl(base_url, max_page, headless, progress=gr.Progress()):
     global QUEUE
     QUEUE = []
 
     max_page = int(max_page)
     logs = []
 
-    folder = get_folder_name(base_url)
+    print(f"\n🚀 STARTING CRAWL: {base_url} (Max: {max_page}, Headless: {headless})")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=headless)
         context = browser.new_context()
         page = context.new_page()
 
-        base_url = urljoin(base_url, ".")
-
-        page.goto(base_url + f"1.html")
-        page.wait_for_timeout(2000)
+        # Ensure base_url ends correctly for concatenation
+        if not base_url.endswith("/"):
+            # If it ends with something like .html, get the directory
+            parsed = urlparse(base_url)
+            if parsed.path and "." in parsed.path.split("/")[-1]:
+                base_url = urljoin(base_url, ".")
 
         for i in range(1, max_page + 1):
-            # if base_url.endswith("1.html"):
-            #     url = base_url.replace("1.html", f"{i}.html")
-            # else:
-            #     url = base_url.rstrip("/") + f"/{i}.html"
-
-            url = base_url + f"{i}.html"
+            url = urljoin(base_url, f"{i}.html")
 
             progress(i / max_page, desc=f"Crawling {i}/{max_page}")
+            print(f"  [{i}/{max_page}] Visiting: {url}")
 
             try:
-                page.goto(url, wait_until="domcontentloaded")
+                page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_timeout(1500)
 
                 media = extract_media_url(page)
 
                 if media:
                     QUEUE.append(media)
-                    logs.append(f"[{i}] FOUND")
+                    msg = f"[{i}] ✅ FOUND: {media}"
+                    logs.append(msg)
+                    print(f"      {msg}")
                 else:
-                    logs.append(f"[{i}] EMPTY")
+                    msg = f"[{i}] ⚠️ EMPTY"
+                    logs.append(msg)
+                    print(f"      {msg}")
 
                 yield "\n".join(logs[-50:]), "\n".join(QUEUE)
 
             except Exception as e:
-                logs.append(f"[{i}] ERROR {e}")
+                msg = f"[{i}] ❌ ERROR: {e}"
+                logs.append(msg)
+                print(f"      {msg}")
                 yield "\n".join(logs[-50:]), "\n".join(QUEUE)
 
         browser.close()
 
+    print("🎉 CRAWL DONE\n")
     yield "🎉 CRAWL DONE", "\n".join(QUEUE)
 
 
 # -------------------------------------------------------
 # 2. DOWNLOAD
 # -------------------------------------------------------
-def download(queue_text, base_url, progress=gr.Progress()):
+def download(queue_text, base_url, headless, progress=gr.Progress()):
 
     urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
 
     if not urls:
+        print("⚠️ Download started with empty queue")
         yield "Empty queue"
         return
 
@@ -168,14 +184,17 @@ def download(queue_text, base_url, progress=gr.Progress()):
     save_dir = os.path.join(OUTPUT_ROOT, folder)
     os.makedirs(save_dir, exist_ok=True)
 
+    print(
+        f"\n📥 STARTING DOWNLOAD: {len(urls)} items -> {save_dir} (Headless: {headless})"
+    )
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=headless)
         context = browser.new_context()
         page = context.new_page()
 
-        page.goto("https://example.com")
-        page.wait_for_timeout(1000)
-
+        # Just to get headers/UA
+        page.goto("https://www.google.com")
         headers = {
             "user_agent": page.evaluate("navigator.userAgent"),
             "referer": base_url,
@@ -185,52 +204,79 @@ def download(queue_text, base_url, progress=gr.Progress()):
         total = len(urls)
 
         for i, url in enumerate(urls, 1):
-
             progress(i / total, desc=f"Downloading {i}/{total}")
 
-            name = f"video_{i}"
+            # name = f"video_{i}"
+            name = get_video_name(url)
             output = os.path.join(save_dir, f"{name}.mp4")
 
-            logs.append(f"[{i}/{total}] {name}")
+            print(f"  [{i}/{total}] {name} ...")
+            logs.append(f"[{i}/{total}] Starting: {name}")
             yield "\n".join(logs[-60:])
 
             for out in run_ffmpeg(url, output, headers):
-                logs[-1] = out
+                logs[-1] = f"[{i}/{total}] {out}"
                 yield "\n".join(logs[-60:])
+
+            print(f"      Finished: {output}")
 
         browser.close()
 
+    print("🎉 DOWNLOAD COMPLETE\n")
     yield "🎉 DOWNLOAD COMPLETE"
 
 
 # -------------------------------------------------------
 # UI
 # -------------------------------------------------------
-with gr.Blocks(title="Crawler Pipeline") as app:
+custom_css = """
+#max-pages {
+    min-width: 100px !important;
+    max-width: 100px !important;
+    flex: none !important;
+}
+#headless-toggle {
+    margin-top: 0px;
+}
+"""
 
-    gr.Markdown("# 🎥 Crawl → Queue → Download Pipeline")
+import gradio as gr
 
-    base_url = gr.Textbox(label="Base URL")
-    max_page = gr.Number(value=10, label="Max Pages")
+with gr.Blocks(title="Crawler Pipeline", theme=gr.themes.Base(), css=custom_css) as app:
 
-    crawl_btn = gr.Button("1️⃣ Crawl")
+    gr.Markdown("# 🎥 The https://www.shortmovs.com/ Downloader")
 
-    crawl_log = gr.Textbox(label="Crawler Log", lines=12)
-    queue_box = gr.Textbox(label="Queue", lines=10)
+    with gr.Row():
+        base_url = gr.Textbox(
+            label="Base URL", placeholder="https://example.com/path/", scale=4
+        )
+        max_page = gr.Number(
+            value=10, label="Max Pages", elem_id="max-pages", precision=0
+        )
 
-    download_btn = gr.Button("2️⃣ Download")
+    with gr.Row():
+        headless = gr.Checkbox(
+            label="Headless", value=True, scale=1, elem_id="headless-toggle"
+        )
+        crawl_btn = gr.Button("1️⃣ Crawl", variant="primary", scale=5)
 
-    download_log = gr.Textbox(label="Download Log", lines=15)
+    with gr.Row():
+        crawl_log = gr.Textbox(label="Crawler Log", lines=12, interactive=False)
+        queue_box = gr.Textbox(label="Queue (URLs found)", lines=12)
+
+    download_btn = gr.Button("2️⃣ Download", variant="primary")
+
+    download_log = gr.Textbox(label="Download Log", lines=15, interactive=False)
 
     crawl_btn.click(
         crawl,
-        inputs=[base_url, max_page],
+        inputs=[base_url, max_page, headless],
         outputs=[crawl_log, queue_box],
     )
 
     download_btn.click(
         download,
-        inputs=[queue_box, base_url],
+        inputs=[queue_box, base_url, headless],
         outputs=download_log,
     )
 
