@@ -1,9 +1,14 @@
+import requests
 import os
 import sys
 import subprocess
+import asyncio
+import json
 import gradio as gr
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
+from bs4 import BeautifulSoup
+# from urllib.parse import urljoin
 
 # Handle PyInstaller --windowed mode where stdout/stderr might be None
 if sys.stdout is None:
@@ -31,6 +36,127 @@ def get_video_name(url: str):
     parts = path.split("/")
     filename = parts[-2] if len(parts) >= 2 else "video"
     return filename.split("_")[-1] if "_" in filename else filename
+
+
+# -------------------------------------------------------
+# CRAWL RECURSIVE (Logic from crawler.py)
+# -------------------------------------------------------
+async def fetch_player_data(url: str):
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "curl", "-s", url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await process.communicate()
+        html = stdout.decode("utf-8", errors="ignore")
+
+        soup = BeautifulSoup(html, "html.parser")
+        
+        cover = ""
+        title = ""
+        pages = ""
+
+        anchor = soup.select_one(".album-title a")
+        if anchor:
+            title = anchor.get_text(strip=True)
+
+        image = soup.select_one(".album-poster img")
+        if image:
+            cover = image.get("src")
+
+        section = soup.select_one(".selections-info")
+        if section:
+            pages = section.get_text(strip=True)
+            pages = pages.split('集')[0]
+
+        # Extract player data
+        start = html.find("var player_aaaa=")
+        if start == -1:
+            return None, title, cover, pages
+
+        start = html.find("{", start)
+        i = start
+        depth = 0
+        end = -1
+        while i < len(html):
+            if html[i] == "{":
+                depth += 1
+            elif html[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+            i += 1
+
+        if end == -1:
+            return None, title, cover, pages
+
+        json_str = html[start:end]
+        return json.loads(json_str), title, cover, pages
+    except Exception as e:
+        print(f"    [Curl] Error: {e}")
+        return None, ""
+
+
+async def crawl_recursive(base_url, progress=gr.Progress()):
+    global QUEUE
+    QUEUE = []
+    logs = []
+
+    parsed = urlparse(base_url)
+    site_base = f"{parsed.scheme}://{parsed.netloc}"
+
+    current_url = base_url
+    visited = set()
+    title = ""
+
+    print(f"\n🚀 STARTING RECURSIVE CRAWL: {base_url}")
+
+    folder = get_folder_name(base_url)
+    save_dir = os.path.join(OUTPUT_ROOT, folder)
+    os.makedirs(save_dir, exist_ok=True)
+
+    while current_url and current_url not in visited:
+        visited.add(current_url)
+        i = len(visited)
+        progress(0, desc=f"Crawling {i}...")
+
+        print(f"  [{i}] Fetching: {current_url}")
+        data, new_title, cover, pages = await fetch_player_data(current_url)
+
+        if i == 1 and cover:
+            title = new_title
+            image_url = site_base + cover
+            with open(os.path.join(save_dir, f"thumb.jpg")  , "wb") as f:
+                f.write(requests.get(image_url).content)
+
+        if data:
+            if data.get("url"):
+                media_url = data["url"]
+
+            # NOTE: same as new_title
+            # if data.get("vod_data"):
+            #     title = data["vod_data"]["vod_name"]
+
+            QUEUE.append(media_url)
+            msg = f"[{i}] ✅ FOUND: {media_url}"
+            logs.append(msg)
+            print(f"      {msg}")
+        else:
+            msg = f"[{i}] ⚠️ EMPTY or FAILED"
+            logs.append(msg)
+            print(f"      {msg}")
+
+        yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, i
+
+        if data and data.get("link_next"):
+            current_url = site_base + data["link_next"]
+        else:
+            current_url = None
+
+    print("🎉 RECURSIVE CRAWL DONE\n")
+    yield "🎉 CRAWL DONE", "\n".join(QUEUE), title, len(visited)
 
 # -------------------------------------------------------
 # FFmpeg runner
@@ -273,8 +399,10 @@ async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Pr
         yield "Starting...", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
 
         if not urls:
+            # NOTE: keep this
+            # async for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
             # Crawl first
-            async for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
+            async for logs, queue, title, m_page in crawl_recursive(base_url, progress):
                 current_queue = queue
                 current_title = title
                 current_max = m_page
