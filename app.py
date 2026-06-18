@@ -265,7 +265,7 @@ async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Pr
     
     current_queue = queue_text
     current_title = movie_title_val
-    current_max = 10 # Default starting max pages
+    current_max = 1 # Default starting max pages
     headless = True  # Default headless mode
 
     try:
@@ -325,8 +325,8 @@ with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) 
     with gr.Row():
         movie_title = gr.Textbox(label="Detected Movie Title", interactive=False)
 
-    queue_box = gr.Textbox(label="Queue (URLs found)", lines=5)
-    all_logs = gr.Textbox(label="Logs", lines=9, interactive=False)
+    queue_box = gr.Textbox(label="Queue (URLs found)", lines=5, max_lines=5)
+    all_logs = gr.Textbox(label="Logs", lines=10, max_lines=10, interactive=False)
 
     download_event = download_btn.click(
         combined_handler,
