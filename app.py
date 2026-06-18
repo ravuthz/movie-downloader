@@ -2,7 +2,7 @@ import os
 import subprocess
 import gradio as gr
 from urllib.parse import urljoin, urlparse
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 OUTPUT_ROOT = "download"
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
@@ -52,59 +52,33 @@ def run_ffmpeg(url, output, headers):
 
     logs = []
 
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            if process.poll() is not None:
-                break
-            continue
+    try:
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                if process.poll() is not None:
+                    break
+                continue
 
-        clean_line = line.strip()
-        if clean_line:
-            print(f"    [FFmpeg] {clean_line}")
-            logs.append(clean_line)
-            yield "\n".join(logs[-40:])
+            clean_line = line.strip()
+            if clean_line:
+                print(f"    [FFmpeg] {clean_line}")
+                logs.append(clean_line)
+                yield "\n".join(logs[-40:])
+    finally:
+        if process.poll() is None:
+            print(f"    [FFmpeg] Terminating process for {output}...")
+            process.terminate()
+            process.wait()
 
-    process.wait()
     status = "✅ DONE" if process.returncode == 0 else "❌ FAILED"
     print(f"    [FFmpeg] {status}")
     yield status
 
-
 # -------------------------------------------------------
-# extract function (CUSTOMIZE THIS)
+# 1. CRAWL (ASYNC)
 # -------------------------------------------------------
-def extract_media_url(page):
-    # -----------------------------
-    # 1. Try player_aaaa (BEST)
-    # -----------------------------
-    try:
-        data = page.evaluate("() => window.player_aaaa || null")
-        if data and isinstance(data, dict) and data.get("url"):
-            return data["url"]
-    except:
-        pass
-
-    # -----------------------------
-    # 2. Try VideoJS DOM
-    # -----------------------------
-    try:
-        m3u8 = page.evaluate("""
-            () => {
-                const el = document.querySelector('#shortmovs-videojs-player_html5_api');
-                return el ? el.getAttribute('src') : null;
-            }
-        """)
-        if m3u8:
-            return m3u8
-    except:
-        pass
-
-
-# -------------------------------------------------------
-# 1. CRAWL
-# -------------------------------------------------------
-def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
+async def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
     global QUEUE
     QUEUE = []
 
@@ -114,10 +88,10 @@ def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
 
     print(f"\n🚀 STARTING CRAWL: {base_url} (Max: {current_max}, Headless: {headless})")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page = context.new_page()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context()
+        page = await context.new_page()
 
         # Ensure base_url ends correctly for concatenation
         if not base_url.endswith("/"):
@@ -134,19 +108,19 @@ def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
             print(f"  [{i}/{current_max}] Visiting: {url}")
 
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(1500)
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(1500)
 
                 # Detect Title and Max Page
                 try:
-                    new_title = page.eval_on_selector(
+                    new_title = await page.eval_on_selector(
                         ".album-title",
                         "el => el.innerText.trim()"
                     )
                     if new_title:
                         title = new_title
 
-                    detected_max = page.eval_on_selector(
+                    detected_max = await page.eval_on_selector(
                         ".selections-info",
                         """
                         el => {
@@ -161,7 +135,8 @@ def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
                 except:
                     pass
 
-                media = extract_media_url(page)
+                # extract_media_url needs to be async too
+                media = await extract_media_url_async(page)
 
                 if media:
                     QUEUE.append(media)
@@ -184,16 +159,41 @@ def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
             
             i += 1
 
-        browser.close()
+        await browser.close()
 
     print("🎉 CRAWL DONE\n")
     yield "🎉 CRAWL DONE", "\n".join(QUEUE), title, current_max
 
 
 # -------------------------------------------------------
-# 2. DOWNLOAD
+# extract function (ASYNC)
 # -------------------------------------------------------
-def download(queue_text, base_url, headless, progress=gr.Progress()):
+async def extract_media_url_async(page):
+    try:
+        data = await page.evaluate("() => window.player_aaaa || null")
+        if data and isinstance(data, dict) and data.get("url"):
+            return data["url"]
+    except:
+        pass
+
+    try:
+        m3u8 = await page.evaluate("""
+            () => {
+                const el = document.querySelector('#shortmovs-videojs-player_html5_api');
+                return el ? el.getAttribute('src') : null;
+            }
+        """)
+        if m3u8:
+            return m3u8
+    except:
+        pass
+    return None
+
+
+# -------------------------------------------------------
+# 2. DOWNLOAD (ASYNC)
+# -------------------------------------------------------
+async def download(queue_text, base_url, headless, progress=gr.Progress()):
 
     urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
 
@@ -212,15 +212,15 @@ def download(queue_text, base_url, headless, progress=gr.Progress()):
         f"\n📥 STARTING DOWNLOAD: {len(urls)} items -> {save_dir} (Headless: {headless})"
     )
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page = context.new_page()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context()
+        page = await context.new_page()
 
         # Just to get headers/UA
-        page.goto("https://www.google.com")
+        await page.goto("https://www.google.com")
         headers = {
-            "user_agent": page.evaluate("navigator.userAgent"),
+            "user_agent": await page.evaluate("navigator.userAgent"),
             "referer": base_url,
             "cookie_header": "",
         }
@@ -230,7 +230,6 @@ def download(queue_text, base_url, headless, progress=gr.Progress()):
         for i, url in enumerate(urls, 1):
             progress(i / total, desc=f"Downloading {i}/{total}")
 
-            # name = f"video_{i}"
             name = get_video_name(url)
             output = os.path.join(save_dir, f"{name}.mp4")
 
@@ -238,22 +237,23 @@ def download(queue_text, base_url, headless, progress=gr.Progress()):
             logs.append(f"[{i}/{total}] Starting: {name}")
             yield "\n".join(logs[-60:])
 
+            # run_ffmpeg is a sync generator, so we use a sync loop
             for out in run_ffmpeg(url, output, headers):
                 logs[-1] = f"[{i}/{total}] {out}"
                 yield "\n".join(logs[-60:])
 
             print(f"      Finished: {output}")
 
-        browser.close()
+        await browser.close()
 
     print("🎉 DOWNLOAD COMPLETE\n")
     yield "🎉 DOWNLOAD COMPLETE"
 
 
 # -------------------------------------------------------
-# 3. COMBINED
+# 3. COMBINED (ASYNC)
 # -------------------------------------------------------
-def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Progress()):
+async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Progress()):
     urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
     
     current_queue = queue_text
@@ -261,28 +261,43 @@ def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Progress
     current_max = 10 # Default starting max pages
     headless = True  # Default headless mode
 
-    if not urls:
-        # Crawl first
-        for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
-            current_queue = queue
-            current_title = title
-            current_max = m_page
-            yield logs, current_queue, current_title
-        
-        urls = [u.strip() for u in current_queue.splitlines() if u.strip()]
+    try:
+        # Initial state: Show Cancel, Hide Download
+        yield "Starting...", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+
         if not urls:
-            return
+            # Crawl first
+            async for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
+                current_queue = queue
+                current_title = title
+                current_max = m_page
+                yield logs, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
             
-    # Download
-    for logs in download(current_queue, base_url, headless, progress):
-        yield logs, current_queue, current_title
+            urls = [u.strip() for u in current_queue.splitlines() if u.strip()]
+            if not urls:
+                yield "No URLs found.", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
+                return
+                
+        # Download
+        async for logs in download(current_queue, base_url, headless, progress):
+            yield logs, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+
+        # Final state: Show Download, Hide Cancel
+        yield "🎉 ALL DONE", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
+    
+    except Exception as e:
+        print(f"Error in combined_handler: {e}")
+        yield f"Error: {e}", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
+    finally:
+        # This will run even if cancelled
+        print("Process ended or cancelled.")
 
 
 # -------------------------------------------------------
 # UI
 # -------------------------------------------------------
 custom_css = """
-#download-btn {
+#download-btn, #cancel-btn {
     margin-top: 0px;
     height: 90px;
 }
@@ -298,6 +313,7 @@ with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) 
             placeholder="https://example.com/path/", scale=4
         )
         download_btn = gr.Button("Download", variant="primary", scale=1, elem_id="download-btn")
+        cancel_btn = gr.Button("Cancel", variant="stop", scale=1, elem_id="cancel-btn", visible=False)
 
     with gr.Row():
         movie_title = gr.Textbox(label="Detected Movie Title", interactive=False)
@@ -305,11 +321,18 @@ with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) 
     queue_box = gr.Textbox(label="Queue (URLs found)", lines=5)
     all_logs = gr.Textbox(label="Logs", lines=9, interactive=False)
 
-    download_btn.click(
+    download_event = download_btn.click(
         combined_handler,
         inputs=[queue_box, base_url, movie_title],
-        outputs=[all_logs, queue_box, movie_title],
+        outputs=[all_logs, queue_box, movie_title, download_btn, cancel_btn],
         show_progress="minimal"
+    )
+
+    cancel_btn.click(
+        fn=lambda: (gr.update(visible=True), gr.update(visible=False), "🛑 Cancelled by user.", "", ""),
+        inputs=None,
+        outputs=[download_btn, cancel_btn, all_logs, queue_box, movie_title],
+        cancels=[download_event]
     )
 
 
