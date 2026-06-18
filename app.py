@@ -84,24 +84,52 @@ def run_ffmpeg(url, output, headers, ui_queue):
 # Async Logic
 # -------------------------------------------------------
 async def extract_media_url_async(page):
+    # 1. Try common JS object
     try:
-        data = await page.evaluate("() => window.player_aaaa || null")
+        data = await page.evaluate("() => window.player_aaaa || window.player_data || null")
         if data and isinstance(data, dict) and data.get("url"):
             return data["url"]
     except:
         pass
 
+    # 2. Try to find m3u8 in all script tags (regex)
+    try:
+        content = await page.content()
+        import re
+        # Look for something like "url": "http...m3u8" or similar patterns
+        match = re.search(r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', content)
+        if match:
+            return match.group(1).replace("\\/", "/")
+    except:
+        pass
+
+    # 3. Check iframes (common for video players)
+    try:
+        frames = page.frames
+        for frame in frames:
+            # Check frame URL for common player keywords
+            if "player" in frame.url or "video" in frame.url or "m3u8" in frame.url:
+                # Try to extract from the frame's JS context too
+                data = await frame.evaluate("() => window.player_aaaa || window.player_data || null")
+                if data and isinstance(data, dict) and data.get("url"):
+                    return data["url"]
+    except:
+        pass
+
+    # 4. Try VideoJS DOM
     try:
         m3u8 = await page.evaluate("""
             () => {
-                const el = document.querySelector('#shortmovs-videojs-player_html5_api');
-                return el ? el.getAttribute('src') : null;
+                const el = document.querySelector('#shortmovs-videojs-player_html5_api, video source, video');
+                if (!el) return null;
+                return el.getAttribute('src') || el.currentSrc || null;
             }
         """)
         if m3u8:
             return m3u8
     except:
         pass
+    
     return None
 
 async def crawl(base_url, max_page_input, ui_queue, stop_event):
@@ -112,7 +140,7 @@ async def crawl(base_url, max_page_input, ui_queue, stop_event):
     ui_queue.put({"type": "log", "msg": f"🚀 STARTING CRAWL: {base_url}"})
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=False)
         context = await browser.new_context()
         page = await context.new_page()
 
@@ -131,7 +159,7 @@ async def crawl(base_url, max_page_input, ui_queue, stop_event):
 
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(2500)
 
                 # Detect Title and Max Page
                 try:
@@ -179,7 +207,7 @@ async def download(urls, base_url, ui_queue, stop_event):
     ui_queue.put({"type": "log", "msg": f"📥 STARTING DOWNLOAD: {len(urls)} items -> {save_dir}"})
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=False)
         context = await browser.new_context()
         page = await context.new_page()
 
