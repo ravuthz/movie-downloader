@@ -14,6 +14,15 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
+# Fix Playwright browser path for bundled EXE
+if getattr(sys, 'frozen', False):
+    # If running as a bundle, point to the global ms-playwright folder 
+    # instead of looking inside the temporary _MEI folder.
+    if sys.platform == "win32":
+        default_path = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright")
+        if os.path.exists(default_path):
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_path
+
 OUTPUT_ROOT = "download"
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
