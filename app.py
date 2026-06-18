@@ -7,6 +7,7 @@ import queue
 import customtkinter as ctk
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 # Handle PyInstaller --windowed mode where stdout/stderr might be None
 if sys.stdout is None:
@@ -140,9 +141,15 @@ async def crawl(base_url, max_page_input, ui_queue, stop_event):
     ui_queue.put({"type": "log", "msg": f"🚀 STARTING CRAWL: {base_url}"})
 
     async with async_playwright() as p:
+        # Using headless=False is often required to pass Cloudflare/Security checks
         browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
         page = await context.new_page()
+        
+        # Apply stealth
+        await stealth_async(page)
 
         if not base_url.endswith("/"):
             parsed = urlparse(base_url)
@@ -207,9 +214,15 @@ async def download(urls, base_url, ui_queue, stop_event):
     ui_queue.put({"type": "log", "msg": f"📥 STARTING DOWNLOAD: {len(urls)} items -> {save_dir}"})
 
     async with async_playwright() as p:
+        # Using headless=False is often required to pass Cloudflare/Security checks
         browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
         page = await context.new_page()
+        
+        # Apply stealth
+        await stealth_async(page)
 
         await page.goto("https://www.google.com")
         headers = {
