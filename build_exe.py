@@ -23,28 +23,29 @@ def build():
     app_name = "Mov1Downloader"
     entry_point = "app.py"
     
-    # 3. Handle Gradio assets
+    # 3. Handle Package Assets
     import gradio
+    import safehttpx
     gradio_path = os.path.dirname(gradio.__file__)
+    safehttpx_path = os.path.dirname(safehttpx.__file__)
     
-    # 4. Handle Playwright
-    # We will assume the user has run 'playwright install chromium'
-    # For a truly portable app, we would bundle the browser, but that adds ~200MB.
-    # Instead, we'll add a check in app.py to install if missing.
-
     # 5. PyInstaller Command
     # --onefile: Create a single executable
-    # --add-data: Bundle Gradio static files
-    # --hidden-import: Ensure dynamic imports are caught
+    # --add-data: Bundle static files
+    # --collect-all: Robustly collect everything for problematic packages
     cmd = [
         "pyinstaller",
         "--noconfirm",
         "--onefile",
-        "--windowed", # No console window
+        "--windowed", 
         "--name", app_name,
         f"--add-data={gradio_path};gradio",
+        f"--add-data={safehttpx_path};safehttpx",
+        "--collect-all=gradio",
+        "--collect-all=safehttpx",
         "--hidden-import=uvicorn",
         "--hidden-import=playwright",
+        "--hidden-import=safehttpx",
         entry_point
     ]
     
