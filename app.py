@@ -7,7 +7,10 @@ import queue
 import customtkinter as ctk
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
+
+# Initialize stealth once
+stealth_obj = Stealth()
 
 # Handle PyInstaller --windowed mode where stdout/stderr might be None
 if sys.stdout is None:
@@ -148,8 +151,8 @@ async def crawl(base_url, max_page_input, ui_queue, stop_event):
         )
         page = await context.new_page()
         
-        # Apply stealth
-        await stealth_async(page)
+        # Apply stealth (v2.x API)
+        await stealth_obj.apply_stealth_async(page)
 
         if not base_url.endswith("/"):
             parsed = urlparse(base_url)
@@ -221,8 +224,8 @@ async def download(urls, base_url, ui_queue, stop_event):
         )
         page = await context.new_page()
         
-        # Apply stealth
-        await stealth_async(page)
+        # Apply stealth (v2.x API)
+        await stealth_obj.apply_stealth_async(page)
 
         await page.goto("https://www.google.com")
         headers = {
