@@ -1,7 +1,10 @@
 import os
 import sys
 import subprocess
-import gradio as gr
+import asyncio
+import threading
+import queue
+import customtkinter as ctk
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
 
@@ -14,30 +17,24 @@ if sys.stderr is None:
 OUTPUT_ROOT = "download"
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
-QUEUE = []
-
-
 # -------------------------------------------------------
-# derive folder name from URL
+# Helpers
 # -------------------------------------------------------
 def get_folder_name(url: str):
     path = urlparse(url).path.strip("/")
     parts = path.split("/")
     return parts[-2] if len(parts) >= 2 else "output"
 
-
 def get_video_name(url: str):
     path = urlparse(url).path.strip("/")
     parts = path.split("/")
     return parts[-2] if len(parts) >= 2 else "video"
 
-
 # -------------------------------------------------------
-# FFmpeg runner
+# FFmpeg runner (modified for queue)
 # -------------------------------------------------------
-def run_ffmpeg(url, output, headers):
+def run_ffmpeg(url, output, headers, ui_queue):
     cmd = [
-        # fmt: off
         "ffmpeg", "-y",
         "-referer", headers["referer"],
         "-headers", headers["cookie_header"],
@@ -46,7 +43,6 @@ def run_ffmpeg(url, output, headers):
         "-c", "copy",
         output,
         "-loglevel", "error",
-        # fmt: on
     ]
 
     process = subprocess.Popen(
@@ -56,8 +52,6 @@ def run_ffmpeg(url, output, headers):
         text=True,
         bufsize=1,
     )
-
-    logs = []
 
     try:
         while True:
@@ -69,111 +63,16 @@ def run_ffmpeg(url, output, headers):
 
             clean_line = line.strip()
             if clean_line:
-                print(f"    [FFmpeg] {clean_line}")
-                logs.append(clean_line)
-                yield "\n".join(logs[-40:])
+                ui_queue.put({"type": "ffmpeg_log", "msg": clean_line})
     finally:
         if process.poll() is None:
-            print(f"    [FFmpeg] Terminating process for {output}...")
             process.terminate()
             process.wait()
 
-    status = "✅ DONE" if process.returncode == 0 else "❌ FAILED"
-    print(f"    [FFmpeg] {status}")
-    yield status
+    return process.returncode == 0
 
 # -------------------------------------------------------
-# 1. CRAWL (ASYNC)
-# -------------------------------------------------------
-async def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
-    global QUEUE
-    QUEUE = []
-
-    current_max = int(max_page_input)
-    title = ""
-    logs = []
-
-    print(f"\n🚀 STARTING CRAWL: {base_url} (Max: {current_max}, Headless: {headless})")
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
-        page = await context.new_page()
-
-        # Ensure base_url ends correctly for concatenation
-        if not base_url.endswith("/"):
-            # If it ends with something like .html, get the directory
-            parsed = urlparse(base_url)
-            if parsed.path and "." in parsed.path.split("/")[-1]:
-                base_url = urljoin(base_url, ".")
-
-        i = 1
-        while i <= current_max:
-            url = urljoin(base_url, f"{i}.html")
-
-            progress(i / current_max, desc=f"Crawling {i}/{current_max}")
-            print(f"  [{i}/{current_max}] Visiting: {url}")
-
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                await page.wait_for_timeout(1500)
-
-                # Detect Title and Max Page
-                try:
-                    new_title = await page.eval_on_selector(
-                        ".album-title",
-                        "el => el.innerText.trim()"
-                    )
-                    if new_title:
-                        title = new_title
-
-                    detected_max = await page.eval_on_selector(
-                        ".selections-info",
-                        """
-                        el => {
-                            const text = el.innerText || "";
-                            const match = text.match(/(\\d+)\\s*集/);
-                            return match ? parseInt(match[1], 10) : 0;
-                        }
-                        """
-                    )
-                    if detected_max > 0:
-                        current_max = detected_max
-                except:
-                    pass
-
-                # extract_media_url needs to be async too
-                media = await extract_media_url_async(page)
-
-                if media:
-                    QUEUE.append(media)
-                    msg = f"[{i}] ✅ FOUND: {media}"
-                    logs.append(msg)
-                    print(f"      {msg}")
-                else:
-                    msg = f"[{i}] ⚠️ EMPTY"
-                    logs.append(msg)
-                    print(f"      {msg}")
-
-                # Single yield per page to minimize flickering
-                yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, current_max
-
-            except Exception as e:
-                msg = f"[{i}] ❌ ERROR: {e}"
-                logs.append(msg)
-                print(f"      {msg}")
-                yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, current_max
-            
-            i += 1
-
-        await browser.close()
-
-    print("🎉 CRAWL DONE\n")
-    yield "🎉 CRAWL DONE", "\n".join(QUEUE), title, current_max
-
-
-# -------------------------------------------------------
-# extract function (ASYNC)
+# Async Logic
 # -------------------------------------------------------
 async def extract_media_url_async(page):
     try:
@@ -196,35 +95,85 @@ async def extract_media_url_async(page):
         pass
     return None
 
+async def crawl(base_url, max_page_input, ui_queue, stop_event):
+    current_max = int(max_page_input)
+    title = ""
+    found_urls = []
 
-# -------------------------------------------------------
-# 2. DOWNLOAD (ASYNC)
-# -------------------------------------------------------
-async def download(queue_text, base_url, headless, progress=gr.Progress()):
+    ui_queue.put({"type": "log", "msg": f"🚀 STARTING CRAWL: {base_url}"})
 
-    urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
 
+        if not base_url.endswith("/"):
+            parsed = urlparse(base_url)
+            if parsed.path and "." in parsed.path.split("/")[-1]:
+                base_url = urljoin(base_url, ".")
+
+        i = 1
+        while i <= current_max:
+            if stop_event.is_set():
+                break
+
+            url = urljoin(base_url, f"{i}.html")
+            ui_queue.put({"type": "log", "msg": f"  [{i}/{current_max}] Visiting: {url}"})
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(1000)
+
+                # Detect Title and Max Page
+                try:
+                    new_title = await page.eval_on_selector(".album-title", "el => el.innerText.trim()")
+                    if new_title:
+                        title = new_title
+                        ui_queue.put({"type": "title", "msg": title})
+
+                    detected_max = await page.eval_on_selector(
+                        ".selections-info",
+                        "el => { const text = el.innerText || ''; const match = text.match(/(\\d+)\\s*集/); return match ? parseInt(match[1], 10) : 0; }"
+                    )
+                    if detected_max > 0:
+                        current_max = detected_max
+                except:
+                    pass
+
+                media = await extract_media_url_async(page)
+                if media:
+                    found_urls.append(media)
+                    ui_queue.put({"type": "queue_update", "msg": "\n".join(found_urls)})
+                    ui_queue.put({"type": "log", "msg": f"[{i}] ✅ FOUND: {media}"})
+                else:
+                    ui_queue.put({"type": "log", "msg": f"[{i}] ⚠️ EMPTY"})
+
+            except Exception as e:
+                ui_queue.put({"type": "log", "msg": f"[{i}] ❌ ERROR: {e}"})
+            
+            i += 1
+
+        await browser.close()
+
+    ui_queue.put({"type": "log", "msg": "🎉 CRAWL DONE"})
+    return found_urls
+
+async def download(urls, base_url, ui_queue, stop_event):
     if not urls:
-        print("⚠️ Download started with empty queue")
-        yield "Empty queue"
+        ui_queue.put({"type": "log", "msg": "⚠️ Download started with empty queue"})
         return
-
-    logs = []
 
     folder = get_folder_name(base_url)
     save_dir = os.path.join(OUTPUT_ROOT, folder)
     os.makedirs(save_dir, exist_ok=True)
 
-    print(
-        f"\n📥 STARTING DOWNLOAD: {len(urls)} items -> {save_dir} (Headless: {headless})"
-    )
+    ui_queue.put({"type": "log", "msg": f"📥 STARTING DOWNLOAD: {len(urls)} items -> {save_dir}"})
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
-        # Just to get headers/UA
         await page.goto("https://www.google.com")
         headers = {
             "user_agent": await page.evaluate("navigator.userAgent"),
@@ -233,115 +182,174 @@ async def download(queue_text, base_url, headless, progress=gr.Progress()):
         }
 
         total = len(urls)
-
         for i, url in enumerate(urls, 1):
-            progress(i / total, desc=f"Downloading {i}/{total}")
+            if stop_event.is_set():
+                break
 
             name = get_video_name(url)
             output = os.path.join(save_dir, f"{name}.mp4")
 
-            print(f"  [{i}/{total}] {name} ...")
-            logs.append(f"[{i}/{total}] Starting: {name}")
-            yield "\n".join(logs[-60:])
-
-            # run_ffmpeg is a sync generator, so we use a sync loop
-            for out in run_ffmpeg(url, output, headers):
-                logs[-1] = f"[{i}/{total}] {out}"
-                yield "\n".join(logs[-60:])
-
-            print(f"      Finished: {output}")
+            ui_queue.put({"type": "log", "msg": f"[{i}/{total}] Starting: {name}"})
+            
+            # Run FFmpeg in a thread to not block the async loop
+            success = await asyncio.to_thread(run_ffmpeg, url, output, headers, ui_queue)
+            
+            if success:
+                ui_queue.put({"type": "log", "msg": f"[{i}/{total}] ✅ DONE"})
+            else:
+                ui_queue.put({"type": "log", "msg": f"[{i}/{total}] ❌ FAILED"})
 
         await browser.close()
 
-    print("🎉 DOWNLOAD COMPLETE\n")
-    yield "🎉 DOWNLOAD COMPLETE"
-
+    ui_queue.put({"type": "log", "msg": "🎉 DOWNLOAD COMPLETE"})
 
 # -------------------------------------------------------
-# 3. COMBINED (ASYNC)
+# GUI Application
 # -------------------------------------------------------
-async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Progress()):
-    urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
-    
-    current_queue = queue_text
-    current_title = movie_title_val
-    current_max = 10 # Default starting max pages
-    headless = True  # Default headless mode
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
 
-    try:
-        # Initial state: Show Cancel, Hide Download
-        yield "Starting...", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+        self.title("Mov1 Downloader")
+        self.geometry("900x700")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
 
-        if not urls:
-            # Crawl first
-            async for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
-                current_queue = queue
-                current_title = title
-                current_max = m_page
-                yield logs, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
-            
-            urls = [u.strip() for u in current_queue.splitlines() if u.strip()]
+        self.ui_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.async_loop = None
+        self.worker_thread = None
+
+        self.setup_ui()
+        self.poll_queue()
+
+    def setup_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(5, weight=1)
+
+        # Row 0: URL and Download/Cancel
+        self.url_frame = ctk.CTkFrame(self)
+        self.url_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="nsew")
+        self.url_frame.grid_columnconfigure(0, weight=4)
+        self.url_frame.grid_columnconfigure(1, weight=1)
+
+        self.url_entry = ctk.CTkEntry(self.url_frame, placeholder_text="Enter Base URL (e.g., https://example.com/path/)")
+        self.url_entry.grid(row=0, column=0, padx=(10, 5), pady=10, sticky="ew")
+
+        self.download_btn = ctk.CTkButton(self.url_frame, text="Download", command=self.on_download_click, fg_color="#1f538d")
+        self.download_btn.grid(row=0, column=1, padx=(5, 10), pady=10, sticky="ew")
+
+        self.cancel_btn = ctk.CTkButton(self.url_frame, text="Cancel", command=self.on_cancel_click, fg_color="#a11d1d", hover_color="#7a1616")
+        self.cancel_btn.grid(row=0, column=1, padx=(5, 10), pady=10, sticky="ew")
+        self.cancel_btn.grid_remove()
+
+        # Row 1: Movie Title
+        self.title_entry = ctk.CTkEntry(self, placeholder_text="Detected Movie Title", state="disabled")
+        self.title_entry.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
+
+        # Row 2: Queue Label
+        self.queue_label = ctk.CTkLabel(self, text="Queue (URLs found):", font=ctk.CTkFont(weight="bold"))
+        self.queue_label.grid(row=3, column=0, padx=20, pady=(10, 0), sticky="w")
+
+        # Row 3: Queue Box
+        self.queue_box = ctk.CTkTextbox(self, height=150)
+        self.queue_box.grid(row=4, column=0, padx=20, pady=(0, 10), sticky="nsew")
+
+        # Row 4: Logs Label
+        self.logs_label = ctk.CTkLabel(self, text="Logs:", font=ctk.CTkFont(weight="bold"))
+        self.logs_label.grid(row=5, column=0, padx=20, pady=(10, 0), sticky="w")
+
+        # Row 5: Logs Box
+        self.logs_box = ctk.CTkTextbox(self, height=250)
+        self.logs_box.grid(row=6, column=0, padx=20, pady=(0, 20), sticky="nsew")
+
+    def log(self, msg):
+        self.logs_box.insert("end", msg + "\n")
+        self.logs_box.see("end")
+
+    def update_queue(self, msg):
+        self.queue_box.delete("1.0", "end")
+        self.queue_box.insert("1.0", msg)
+
+    def set_title(self, title):
+        self.title_entry.configure(state="normal")
+        self.title_entry.delete(0, "end")
+        self.title_entry.insert(0, title)
+        self.title_entry.configure(state="disabled")
+
+    def on_download_click(self):
+        url = self.url_entry.get().strip()
+        if not url:
+            self.log("❌ Error: Please enter a URL.")
+            return
+
+        self.stop_event.clear()
+        self.download_btn.grid_remove()
+        self.cancel_btn.grid()
+        
+        # Start async worker in a thread
+        self.worker_thread = threading.Thread(target=self.run_async_tasks, args=(url,))
+        self.worker_thread.daemon = True
+        self.worker_thread.start()
+
+    def on_cancel_click(self):
+        self.stop_event.set()
+        self.log("🛑 Cancelling...")
+        self.reset_ui()
+
+    def reset_ui(self):
+        self.cancel_btn.grid_remove()
+        self.download_btn.grid()
+        self.title_entry.configure(state="normal")
+        self.title_entry.delete(0, "end")
+        self.title_entry.configure(state="disabled")
+        self.queue_box.delete("1.0", "end")
+        # self.logs_box.delete("1.0", "end") # Keep logs for history
+
+    def run_async_tasks(self, url):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            queue_content = self.queue_box.get("1.0", "end").strip()
+            urls = [u.strip() for u in queue_content.splitlines() if u.strip()]
+
             if not urls:
-                yield "No URLs found.", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
-                return
-                
-        # Download
-        async for logs in download(current_queue, base_url, headless, progress):
-            yield logs, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+                # Crawl
+                urls = loop.run_until_complete(crawl(url, 10, self.ui_queue, self.stop_event))
+            
+            if urls and not self.stop_event.is_set():
+                # Download
+                loop.run_until_complete(download(urls, url, self.ui_queue, self.stop_event))
+        
+        except Exception as e:
+            self.ui_queue.put({"type": "log", "msg": f"FATAL ERROR: {e}"})
+        finally:
+            loop.close()
+            self.ui_queue.put({"type": "done"})
 
-        # Final state: Show Download, Hide Cancel
-        yield "🎉 ALL DONE", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
-    
-    except Exception as e:
-        print(f"Error in combined_handler: {e}")
-        yield f"Error: {e}", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
-    finally:
-        # This will run even if cancelled
-        print("Process ended or cancelled.")
-
-
-# -------------------------------------------------------
-# UI
-# -------------------------------------------------------
-custom_css = """
-#download-btn, #cancel-btn {
-    margin-top: 0px;
-    height: 90px;
-}
-"""
-
-with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) as app:
-
-    gr.Markdown("# 🎥 The https://www.shortmovs.com/ Downloader")
-
-    with gr.Row():
-        base_url = gr.Textbox(
-            label="Base URL", 
-            placeholder="https://example.com/path/", scale=4
-        )
-        download_btn = gr.Button("Download", variant="primary", scale=1, elem_id="download-btn")
-        cancel_btn = gr.Button("Cancel", variant="stop", scale=1, elem_id="cancel-btn", visible=False)
-
-    with gr.Row():
-        movie_title = gr.Textbox(label="Detected Movie Title", interactive=False)
-
-    queue_box = gr.Textbox(label="Queue (URLs found)", lines=5)
-    all_logs = gr.Textbox(label="Logs", lines=9, interactive=False)
-
-    download_event = download_btn.click(
-        combined_handler,
-        inputs=[queue_box, base_url, movie_title],
-        outputs=[all_logs, queue_box, movie_title, download_btn, cancel_btn],
-        show_progress="minimal"
-    )
-
-    cancel_btn.click(
-        fn=lambda: (gr.update(visible=True), gr.update(visible=False), "🛑 Cancelled by user.", "", ""),
-        inputs=None,
-        outputs=[download_btn, cancel_btn, all_logs, queue_box, movie_title],
-        cancels=[download_event]
-    )
-
+    def poll_queue(self):
+        while True:
+            try:
+                msg = self.ui_queue.get_nowait()
+                if msg["type"] == "log":
+                    self.log(msg["msg"])
+                elif msg["type"] == "ffmpeg_log":
+                    # Update last line or just append
+                    self.log(f"    [FFmpeg] {msg['msg']}")
+                elif msg["type"] == "title":
+                    self.set_title(msg["msg"])
+                elif msg["type"] == "queue_update":
+                    self.update_queue(msg["msg"])
+                elif msg["type"] == "done":
+                    self.reset_ui()
+                    self.log("🏁 Process finished.")
+            except queue.Empty:
+                break
+        
+        self.after(100, self.poll_queue)
 
 if __name__ == "__main__":
-    app.launch(server_name="127.0.0.1", inbrowser=True)
+    app = App()
+    app.mainloop()

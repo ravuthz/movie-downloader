@@ -1,6 +1,5 @@
-gradio
+customtkinter
 playwright
 playwright-stealth
 python-dotenv
-uvicorn
 ffmpeg-python

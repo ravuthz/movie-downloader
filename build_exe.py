@@ -3,14 +3,14 @@ import sys
 import subprocess
 import shutil
 
-# This script is intended to be run on Windows to create a standalone executable.
+# This script is intended to be run on Windows to create a standalone native executable.
 # Prerequisites: 
 # 1. Python installed
-# 2. pip install pyinstaller playwright gradio
+# 2. pip install pyinstaller playwright customtkinter
 # 3. playwright install chromium
 
 def build():
-    print("🚀 Starting build process...")
+    print("🚀 Starting native build process...")
     
     # 1. Check if pyinstaller is installed
     try:
@@ -23,42 +23,28 @@ def build():
     app_name = "Mov1Downloader"
     entry_point = "app.py"
     
-    # 3. Handle Package Assets
-    import gradio
-    import safehttpx
-    import groovy
+    # 3. Handle CustomTkinter
+    import customtkinter
+    ctk_path = os.path.dirname(customtkinter.__file__)
     
-    gradio_path = os.path.dirname(gradio.__file__)
-    safehttpx_path = os.path.dirname(safehttpx.__file__)
-    groovy_path = os.path.dirname(groovy.__file__)
-    
-    # 5. PyInstaller Command
+    # 4. PyInstaller Command
     # --onefile: Create a single executable
-    # --add-data: Bundle static files
-    # --collect-all: Robustly collect everything for problematic packages
+    # --windowed: No console window
     cmd = [
         "pyinstaller",
         "--noconfirm",
         "--onefile",
         "--windowed", 
         "--name", app_name,
-        f"--add-data={gradio_path};gradio",
-        f"--add-data={safehttpx_path};safehttpx",
-        f"--add-data={groovy_path};groovy",
-        "--collect-all=gradio",
-        "--collect-all=safehttpx",
-        "--collect-all=groovy",
-        "--hidden-import=uvicorn",
+        f"--add-data={ctk_path};customtkinter",
         "--hidden-import=playwright",
-        "--hidden-import=safehttpx",
-        "--hidden-import=groovy",
         entry_point
     ]
     
     print(f"📦 Running PyInstaller command: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
     
-    print(f"✅ Build complete! Find your EXE in the 'dist' folder.")
+    print(f"✅ Build complete! Find your native EXE in the 'dist' folder.")
 
 if __name__ == "__main__":
     build()
