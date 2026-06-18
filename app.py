@@ -137,7 +137,7 @@ def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
                 page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_timeout(1500)
 
-                # Detect Title and Max Page (only on first page or if not yet set)
+                # Detect Title and Max Page
                 try:
                     new_title = page.eval_on_selector(
                         ".album-title",
@@ -158,10 +158,6 @@ def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
                     )
                     if detected_max > 0:
                         current_max = detected_max
-
-                    # Real-time update to UI metadata immediately after detection
-                    yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, current_max
-
                 except:
                     pass
 
@@ -177,6 +173,7 @@ def crawl(base_url, max_page_input, headless, progress=gr.Progress()):
                     logs.append(msg)
                     print(f"      {msg}")
 
+                # Single yield per page to minimize flickering
                 yield "\n".join(logs[-50:]), "\n".join(QUEUE), title, current_max
 
             except Exception as e:
@@ -254,11 +251,40 @@ def download(queue_text, base_url, headless, progress=gr.Progress()):
 
 
 # -------------------------------------------------------
+# 3. COMBINED
+# -------------------------------------------------------
+def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Progress()):
+    urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
+    
+    current_queue = queue_text
+    current_title = movie_title_val
+    current_max = 10 # Default starting max pages
+    headless = True  # Default headless mode
+
+    if not urls:
+        # Crawl first
+        for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
+            current_queue = queue
+            current_title = title
+            current_max = m_page
+            yield logs, current_queue, current_title
+        
+        urls = [u.strip() for u in current_queue.splitlines() if u.strip()]
+        if not urls:
+            return
+            
+    # Download
+    for logs in download(current_queue, base_url, headless, progress):
+        yield logs, current_queue, current_title
+
+
+# -------------------------------------------------------
 # UI
 # -------------------------------------------------------
 custom_css = """
-#headless-toggle {
-    padding-top: 35px;
+#download-btn {
+    margin-top: 0px;
+    height: 90px;
 }
 """
 
@@ -268,35 +294,22 @@ with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) 
 
     with gr.Row():
         base_url = gr.Textbox(
-            label="Base URL", placeholder="https://example.com/path/", scale=4
+            label="Base URL", 
+            placeholder="https://example.com/path/", scale=4
         )
-        max_page = gr.Number(
-            value=10, label="Max Pages", elem_id="max-pages", scale=1, precision=0
-        )
+        download_btn = gr.Button("Download", variant="primary", scale=1, elem_id="download-btn")
 
     with gr.Row():
-        movie_title = gr.Textbox(label="Detected Movie Title", interactive=False, scale=4)
-        headless = gr.Checkbox(
-            label="Headless", value=True, scale=1, elem_id="headless-toggle"
-        )
+        movie_title = gr.Textbox(label="Detected Movie Title", interactive=False)
 
-    with gr.Row():
-        crawl_btn = gr.Button("1️⃣ Crawl", variant="primary")
-        download_btn = gr.Button("2️⃣ Download", variant="primary")
-
-    queue_box = gr.Textbox(label="Queue (URLs found)", lines=9)
+    queue_box = gr.Textbox(label="Queue (URLs found)", lines=5)
     all_logs = gr.Textbox(label="Logs", lines=9, interactive=False)
 
-    crawl_btn.click(
-        crawl,
-        inputs=[base_url, max_page, headless],
-        outputs=[all_logs, queue_box, movie_title, max_page],
-    )
-
     download_btn.click(
-        download,
-        inputs=[queue_box, base_url, headless],
-        outputs=all_logs,
+        combined_handler,
+        inputs=[queue_box, base_url, movie_title],
+        outputs=[all_logs, queue_box, movie_title],
+        show_progress="minimal"
     )
 
 
