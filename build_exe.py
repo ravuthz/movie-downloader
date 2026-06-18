@@ -25,7 +25,9 @@ def build():
     
     # 3. Handle CustomTkinter
     import customtkinter
+    import playwright_stealth
     ctk_path = os.path.dirname(customtkinter.__file__)
+    stealth_path = os.path.dirname(playwright_stealth.__file__)
     
     # 4. PyInstaller Command
     # --onefile: Create a single executable
@@ -37,7 +39,10 @@ def build():
         "--windowed", 
         "--name", app_name,
         f"--add-data={ctk_path};customtkinter",
+        f"--add-data={stealth_path};playwright_stealth",
+        "--collect-all=playwright_stealth",
         "--hidden-import=playwright",
+        "--hidden-import=playwright_stealth",
         entry_point
     ]
     
