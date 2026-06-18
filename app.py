@@ -29,8 +29,8 @@ def get_folder_name(url: str):
 def get_video_name(url: str):
     path = urlparse(url).path.strip("/")
     parts = path.split("/")
-    return parts[-2] if len(parts) >= 2 else "video"
-
+    filename = parts[-2] if len(parts) >= 2 else "video"
+    return filename.split("_")[-1] if "_" in filename else filename
 
 # -------------------------------------------------------
 # FFmpeg runner
@@ -310,7 +310,7 @@ custom_css = """
 }
 """
 
-with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) as app:
+with gr.Blocks(title="Video Downloader", theme=gr.themes.Base(), css=custom_css) as app:
 
     gr.Markdown("# 🎥 The https://www.shortmovs.com/ Downloader")
 
