@@ -344,4 +344,4 @@ with gr.Blocks(title="Mov1 Downloader", theme=gr.themes.Base(), css=custom_css) 
 
 
 if __name__ == "__main__":
-    app.launch(server_name="0.0.0.0", server_port=7860)
+    app.launch(server_name="127.0.0.1")
