@@ -1,8 +1,15 @@
 import os
+import sys
 import subprocess
 import gradio as gr
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
+
+# Handle PyInstaller --windowed mode where stdout/stderr might be None
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w')
 
 OUTPUT_ROOT = "download"
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
