@@ -26,8 +26,11 @@ def build():
     # 3. Handle Package Assets
     import gradio
     import safehttpx
+    import groovy
+    
     gradio_path = os.path.dirname(gradio.__file__)
     safehttpx_path = os.path.dirname(safehttpx.__file__)
+    groovy_path = os.path.dirname(groovy.__file__)
     
     # 5. PyInstaller Command
     # --onefile: Create a single executable
@@ -41,11 +44,14 @@ def build():
         "--name", app_name,
         f"--add-data={gradio_path};gradio",
         f"--add-data={safehttpx_path};safehttpx",
+        f"--add-data={groovy_path};groovy",
         "--collect-all=gradio",
         "--collect-all=safehttpx",
+        "--collect-all=groovy",
         "--hidden-import=uvicorn",
         "--hidden-import=playwright",
         "--hidden-import=safehttpx",
+        "--hidden-import=groovy",
         entry_point
     ]
     
