@@ -147,12 +147,18 @@ async def crawl(base_url, max_page_input, ui_queue, stop_event):
         # Using headless=False is often required to pass Cloudflare/Security checks
         browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080},
+            locale="en-US",
+            timezone_id="America/New_York",
         )
         page = await context.new_page()
         
         # Apply stealth (v2.x API)
         await stealth_obj.apply_stealth_async(page)
+
+        # Extra measure: Remove webdriver property
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         if not base_url.endswith("/"):
             parsed = urlparse(base_url)
@@ -220,12 +226,18 @@ async def download(urls, base_url, ui_queue, stop_event):
         # Using headless=False is often required to pass Cloudflare/Security checks
         browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080},
+            locale="en-US",
+            timezone_id="America/New_York",
         )
         page = await context.new_page()
         
         # Apply stealth (v2.x API)
         await stealth_obj.apply_stealth_async(page)
+
+        # Extra measure: Remove webdriver property
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         await page.goto("https://www.google.com")
         headers = {
