@@ -20,6 +20,40 @@ OUTPUT_ROOT = "download"
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 QUEUE = []
+RESULTS_FILE = "results.json"
+
+
+# -------------------------------------------------------
+# results.json tracking
+# -------------------------------------------------------
+def load_results(filepath):
+    """Load the results.json file, return a list of records."""
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return []
+    return []
+
+
+def save_results(filepath, records):
+    """Save records list to results.json."""
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
+
+
+def is_downloaded(filepath, url):
+    """Check if a base URL has already been downloaded."""
+    records = load_results(filepath)
+    return any(r.get("url") == url for r in records)
+
+
+def add_result(filepath, name, url, folder):
+    """Add a download record to results.json."""
+    records = load_results(filepath)
+    records.append({"name": name, "url": url, "folder": folder})
+    save_results(filepath, records)
 
 
 # -------------------------------------------------------
@@ -326,7 +360,7 @@ async def extract_media_url_async(page):
 # -------------------------------------------------------
 # 2. DOWNLOAD (ASYNC)
 # -------------------------------------------------------
-async def download(queue_text, base_url, headless, output_dir=OUTPUT_ROOT, progress=gr.Progress()):
+async def download(queue_text, base_url, headless, output_dir=OUTPUT_ROOT, title="", results_file=None, progress=gr.Progress()):
 
     urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
 
@@ -379,6 +413,12 @@ async def download(queue_text, base_url, headless, output_dir=OUTPUT_ROOT, progr
 
         await browser.close()
 
+    # Record to results.json after all episodes downloaded
+    if results_file:
+        record_name = title if title else folder
+        add_result(results_file, record_name, base_url, folder)
+        print(f"📝 Recorded to {results_file}: {record_name}")
+
     print("🎉 DOWNLOAD COMPLETE\n")
     yield "🎉 DOWNLOAD COMPLETE"
 
@@ -386,42 +426,62 @@ async def download(queue_text, base_url, headless, output_dir=OUTPUT_ROOT, progr
 # -------------------------------------------------------
 # 3. COMBINED (ASYNC)
 # -------------------------------------------------------
-async def combined_handler(queue_text, base_url, movie_title_val, output_dir_val, progress=gr.Progress()):
+async def combined_handler(queue_text, base_urls_text, movie_title_val, output_dir_val, progress=gr.Progress()):
     output_dir = output_dir_val.strip() if output_dir_val and output_dir_val.strip() else OUTPUT_ROOT
     os.makedirs(output_dir, exist_ok=True)
-    urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
-    
+
+    results_file = os.path.join(output_dir, RESULTS_FILE)
+
+    # Split base URLs by newline — support multiple URLs
+    base_urls = [u.strip() for u in base_urls_text.splitlines() if u.strip()]
+    if not base_urls:
+        yield "No URLs provided.", queue_text, movie_title_val, gr.update(visible=True), gr.update(visible=False)
+        return
+
+    headless = True
     current_queue = queue_text
     current_title = movie_title_val
-    current_max = 1 # Default starting max pages
-    headless = True  # Default headless mode
+    total_urls = len(base_urls)
 
     try:
         # Initial state: Show Cancel, Hide Download
         yield "Starting...", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
 
-        if not urls:
-            # NOTE: keep this
-            # async for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
-            # Crawl first
+        for url_idx, base_url in enumerate(base_urls, 1):
+            prefix = f"[{url_idx}/{total_urls}]" if total_urls > 1 else ""
+
+            # Check if already downloaded
+            if is_downloaded(results_file, base_url):
+                msg = f"{prefix} ⏭️ SKIPPED (already downloaded): {base_url}"
+                print(msg)
+                yield msg, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+                continue
+
+            print(f"\n{prefix} 🔗 Processing: {base_url}")
+            yield f"{prefix} 🔗 Processing: {base_url}", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+
+            # Crawl
             async for logs, queue, title, m_page in crawl_recursive(base_url, output_dir, progress):
                 current_queue = queue
                 current_title = title
-                current_max = m_page
-                yield logs, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
-            
+                yield f"{prefix} {logs}", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+
             urls = [u.strip() for u in current_queue.splitlines() if u.strip()]
             if not urls:
-                yield "No URLs found.", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
-                return
-                
-        # Download
-        async for logs in download(current_queue, base_url, headless, output_dir, progress):
-            yield logs, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+                yield f"{prefix} No media URLs found for: {base_url}", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+                continue
+
+            # Download
+            async for logs in download(current_queue, base_url, headless, output_dir, current_title, results_file, progress):
+                yield f"{prefix} {logs}", current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
+
+            # Reset queue for next URL
+            current_queue = ""
+            current_title = ""
 
         # Final state: Show Download, Hide Cancel
         yield "🎉 ALL DONE", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
-    
+
     except Exception as e:
         print(f"Error in combined_handler: {e}")
         yield f"Error: {e}", current_queue, current_title, gr.update(visible=True), gr.update(visible=False)
@@ -447,8 +507,11 @@ with gr.Blocks(title="Video Downloader", theme=gr.themes.Base(), css=custom_css)
 
     with gr.Row():
         base_url = gr.Textbox(
-            label="Base URL", 
-            placeholder="https://example.com/path/", scale=4
+            label="Base URLs (one per line)", 
+            placeholder="https://example.com/path/1/\nhttps://example.com/path/2/",
+            lines=3,
+            max_lines=5,
+            scale=4,
         )
         download_btn = gr.Button("Download", variant="primary", scale=1, elem_id="download-btn")
         cancel_btn = gr.Button("Cancel", variant="stop", scale=1, elem_id="cancel-btn", visible=False)
