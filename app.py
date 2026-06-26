@@ -99,7 +99,7 @@ async def fetch_player_data(url: str):
         return None, ""
 
 
-async def crawl_recursive(base_url, progress=gr.Progress()):
+async def crawl_recursive(base_url, output_dir=OUTPUT_ROOT, progress=gr.Progress()):
     global QUEUE
     QUEUE = []
     logs = []
@@ -114,7 +114,7 @@ async def crawl_recursive(base_url, progress=gr.Progress()):
     print(f"\n🚀 STARTING RECURSIVE CRAWL: {base_url}")
 
     folder = get_folder_name(base_url)
-    save_dir = os.path.join(OUTPUT_ROOT, folder)
+    save_dir = os.path.join(output_dir, folder)
     os.makedirs(save_dir, exist_ok=True)
 
     while current_url and current_url not in visited:
@@ -326,7 +326,7 @@ async def extract_media_url_async(page):
 # -------------------------------------------------------
 # 2. DOWNLOAD (ASYNC)
 # -------------------------------------------------------
-async def download(queue_text, base_url, headless, progress=gr.Progress()):
+async def download(queue_text, base_url, headless, output_dir=OUTPUT_ROOT, progress=gr.Progress()):
 
     urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
 
@@ -338,7 +338,7 @@ async def download(queue_text, base_url, headless, progress=gr.Progress()):
     logs = []
 
     folder = get_folder_name(base_url)
-    save_dir = os.path.join(OUTPUT_ROOT, folder)
+    save_dir = os.path.join(output_dir, folder)
     os.makedirs(save_dir, exist_ok=True)
 
     print(
@@ -386,7 +386,9 @@ async def download(queue_text, base_url, headless, progress=gr.Progress()):
 # -------------------------------------------------------
 # 3. COMBINED (ASYNC)
 # -------------------------------------------------------
-async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Progress()):
+async def combined_handler(queue_text, base_url, movie_title_val, output_dir_val, progress=gr.Progress()):
+    output_dir = output_dir_val.strip() if output_dir_val and output_dir_val.strip() else OUTPUT_ROOT
+    os.makedirs(output_dir, exist_ok=True)
     urls = [u.strip() for u in queue_text.splitlines() if u.strip()]
     
     current_queue = queue_text
@@ -402,7 +404,7 @@ async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Pr
             # NOTE: keep this
             # async for logs, queue, title, m_page in crawl(base_url, current_max, headless, progress):
             # Crawl first
-            async for logs, queue, title, m_page in crawl_recursive(base_url, progress):
+            async for logs, queue, title, m_page in crawl_recursive(base_url, output_dir, progress):
                 current_queue = queue
                 current_title = title
                 current_max = m_page
@@ -414,7 +416,7 @@ async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Pr
                 return
                 
         # Download
-        async for logs in download(current_queue, base_url, headless, progress):
+        async for logs in download(current_queue, base_url, headless, output_dir, progress):
             yield logs, current_queue, current_title, gr.update(visible=False), gr.update(visible=True)
 
         # Final state: Show Download, Hide Cancel
@@ -426,6 +428,7 @@ async def combined_handler(queue_text, base_url, movie_title_val, progress=gr.Pr
     finally:
         # This will run even if cancelled
         print("Process ended or cancelled.")
+
 
 
 # -------------------------------------------------------
@@ -452,13 +455,19 @@ with gr.Blocks(title="Video Downloader", theme=gr.themes.Base(), css=custom_css)
 
     with gr.Row():
         movie_title = gr.Textbox(label="Detected Movie Title", interactive=False)
+        output_dir = gr.Textbox(
+            label="Output Directory",
+            value=OUTPUT_ROOT,
+            placeholder="download",
+        )
 
     queue_box = gr.Textbox(label="Queue (URLs found)", lines=5, max_lines=5)
+
     all_logs = gr.Textbox(label="Logs", lines=10, max_lines=10, interactive=False)
 
     download_event = download_btn.click(
         combined_handler,
-        inputs=[queue_box, base_url, movie_title],
+        inputs=[queue_box, base_url, movie_title, output_dir],
         outputs=[all_logs, queue_box, movie_title, download_btn, cancel_btn],
         show_progress="minimal"
     )
