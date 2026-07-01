@@ -4,6 +4,7 @@ import sys
 import subprocess
 import asyncio
 import json
+from dotenv import load_dotenv
 import gradio as gr
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
@@ -16,7 +17,12 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
-OUTPUT_ROOT = "download"
+load_dotenv()
+
+DEFAULT_OUTPUT_ROOT = "download"
+
+OUTPUT_ROOT = os.environ.get("OUTPUT_DIR", DEFAULT_OUTPUT_ROOT).strip() or DEFAULT_OUTPUT_ROOT
+OUTPUT_ROOT = os.path.expanduser(os.path.expandvars(OUTPUT_ROOT))
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 QUEUE = []

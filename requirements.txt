@@ -1,6 +1,8 @@
+requests
 gradio
 playwright
 playwright-stealth
 python-dotenv
 uvicorn
 ffmpeg-python
+bs4

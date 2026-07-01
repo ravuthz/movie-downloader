@@ -9,3 +9,5 @@ input
 output
 result
 download*
+
+__pycache__
